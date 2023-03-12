@@ -28,6 +28,8 @@ from enum import Enum
 from itertools import islice
 from typing import List, TypeVar, Type, Iterable
 
+# Keep script name in global constant
+SCRIPT_NAME = pathlib.Path(__file__).name
 # Type vairable for type annotation in ManifestFile class.
 S = TypeVar("S", bound="ManifestFile")
 
@@ -100,24 +102,14 @@ class ManifestFile:
             else:
                 self.add_file(file.stem, f"{file.absolute()}", Direction.Unknown)
 
-    def create(self) -> None:
-        """Creates new manifest file on the filesystem."""
-        with open(self.name, "w") as file:
+    def emit(self, mode: str) -> None:
+        """Creates new manifest file or appends to manifest file  on the filesystem."""
+        with open(self.name, mode) as file:
             for line in self._unwritten_lines:
                 file.write(line)
         # Move unwritten lines to self._lines and then remove the
         # contents of self._unwritten_lines
         self._lines.extend(self.unwritten_lines)
-        self._unwritten_lines.clear()
-
-    def update(self) -> None:
-        """Appends to the existing manifest file on the filesystem."""
-        with open(self.name, "a") as file:
-            for line in self._unwritten_lines:
-                file.write(line)
-        # Move unwritten lines to self._lines and then remove the
-        # contents of self._unwritten_lines
-        self._lines.extend(self._unwritten_lines)
         self._unwritten_lines.clear()
 
 
@@ -131,7 +123,8 @@ def parse_args() -> argparse.Namespace:
         "-o and -a are provided to output generated entries to files. Option -i can "
         "be used to get automatic inference of reads' direction. however it's not "
         "guaranteed to work everytime. By default direction in generated manifest "
-        "needs to be edited manually."
+        "needs to be edited manually. "
+        "For now this utility works only with uncompressed fasta files."
     )
     parser = argparse.ArgumentParser(description=description)
     output = parser.add_mutually_exclusive_group()
@@ -172,7 +165,8 @@ def infer_direction(filepath: pathlib.Path, n=100) -> Direction:
     """Returns a direction of reads in a file given by a filepath.
 
     It is assumed here that all reads in a file are same members of their pairs, i.e.
-    All are either forward or reverse.
+    All are either forward or reverse. This function checks first n lines for a file
+    in seach of sequence identifier from which it can infer the direction of a sequence.
 
     Raises: InferenceError"""
 
@@ -183,8 +177,10 @@ def infer_direction(filepath: pathlib.Path, n=100) -> Direction:
     new_format = lambda x: x.split(" ")[1].split(":")[0]  # post-Casava 1.8
     member_number: int = 0
     with open(filepath, "r") as file:
+        # Create an iterator containing only first n lines of a file.
         lines = islice(file, n)
         for line in lines:
+            # Check only identifier lines.
             if line.startswith("@"):
                 try:
                     member_number = new_format(line)
@@ -193,7 +189,7 @@ def infer_direction(filepath: pathlib.Path, n=100) -> Direction:
                 except (IndexError, TypeError):
                     # Raise inference error if wasn't able to infer.
                     raise InferenceError(
-                        f"{script_basename()}: error: couldn't infer direction in file: {filepath.name}"
+                        f"{SCRIPT_NAME}: error: couldn't infer direction in file: {filepath.name}"
                     )
                 break
     if member_number == "1":
@@ -207,7 +203,6 @@ def infer_direction(filepath: pathlib.Path, n=100) -> Direction:
 
 def main() -> int:
     args = parse_args()
-    script_basename = pathlib.Path(__file__).name
     # Get paths to files as pathlb.Path objects. Makes working with paths later, easier.
     files = [pathlib.Path(file) for file in args.files]
 
@@ -215,12 +210,12 @@ def main() -> int:
     # meaning a failure
     if not all(".fastq" == file.suffix for file in files):
         print(
-            f"{script_basename}: error: All files must be valid fastq files and their names must end with '.fastq'"
+            f"{SCRIPT_NAME}: error: All files must be valid fastq files and their names must end with '.fastq'"
         )
         return 1
     if not all(file.exists() for file in files):
         print(
-            f"{script_basename}: error: [Errrno 2] No such file or directory '{next(filter(lambda x: not x.exists(), files))}'"
+            f"{SCRIPT_NAME}: error: [Errrno 2] No such file or directory '{next(filter(lambda x: not x.exists(), files))}'"
         )
         return 2
 
@@ -228,14 +223,14 @@ def main() -> int:
     if args.append:
         file = pathlib.Path(args.append)
         if not file.exists():
-            print(f"{script_basename}: error: File {file} not found!")
+            print(f"{SCRIPT_NAME}: error: File {file} not found!")
             return 1
         manifest = ManifestFile.from_file(pathlib.Path(args.append))
     elif args.output:
         file = pathlib.Path(args.output)
         if args.no_overwrite:
             if file.exists():
-                print(f"{script_basename}: error: File {file} exists!")
+                print(f"{SCRIPT_NAME}: error: File {file} exists!")
                 return 1
         manifest = ManifestFile(pathlib.Path(args.output))
     else:
@@ -247,9 +242,9 @@ def main() -> int:
     # Create manifest file or append to existing manifest file. Else print
     # results to stdout. Return 0, meaning a success.
     if args.append:
-        manifest.update()
+        manifest.emit("a")
     elif args.output:
-        manifest.create()
+        manifest.emit("w")
     else:
         for line in manifest.unwritten_lines:
             print(line, end="")
