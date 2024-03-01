@@ -22,11 +22,13 @@
 # SOFTWARE.
 
 import argparse
+import functools
+import itertools
 import pathlib
+import re
 import sys
 from enum import Enum
-from itertools import islice
-from typing import List, TypeVar, Type, Iterable
+from typing import Callable, List, Optional, TypeVar, Type, Iterable
 
 # Keep script name in global constant
 SCRIPT_NAME = pathlib.Path(__file__).name
@@ -67,7 +69,7 @@ class ManifestFile:
     @classmethod
     def from_file(cls: Type[S], filepath: pathlib.Path) -> S:
         """Returns a ManifestFile class instance from path to existing manifest file."""
-        lines: List[str] = [cls.HEADER]
+        lines: List[str] = []
         with open(filepath, "r") as file:
             for line in file.readlines():
                 lines.append(line)
@@ -77,7 +79,6 @@ class ManifestFile:
         new._lines = lines
         # Remove header from list of unwritten lines.
         new._unwritten_lines = []
-        new.exists = True
         return new
 
     @property
@@ -94,13 +95,21 @@ class ManifestFile:
         """Adds new file entry (row) to the manifest file list of unwritten lines."""
         self._unwritten_lines.append(f"{name},{file_path},{direction.value}\n")
 
-    def extend_manifest(self, files: Iterable[pathlib.Path], infer: bool) -> None:
+    def extend_manifest(
+        self,
+        files: Iterable[pathlib.Path],
+        infer: bool,
+        substitution_function: Optional[Callable]= None
+    ) -> None:
         """Adds entries to the ManifestFile for all files in files Iterable."""
         for file in files:
+            direction = Direction.Unknown
+            filename = file.stem
             if infer:
-                self.add_file(file.stem, f"{file.absolute()}", infer_direction(file))
-            else:
-                self.add_file(file.stem, f"{file.absolute()}", Direction.Unknown)
+                direction = infer_direction(file)
+            if substitution_function is not None:
+                filename = substitution_function(string=filename)
+            self.add_file(filename, f"{file.absolute()}", direction)
 
     def emit(self, mode: str) -> None:
         """Creates new manifest file or appends to manifest file  on the filesystem."""
@@ -157,6 +166,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="don't overwrite existing files when creating manifest (rquires -o option)",
     )
+    parser.add_argument(
+        "-r",
+        "--regex-pattern",
+        type=str,
+        help="Regular expression that will be matched against file names to create sample names",
+    )
     return parser.parse_args()
 
 
@@ -178,7 +193,7 @@ def infer_direction(filepath: pathlib.Path, n=100) -> Direction:
     member_number: int = 0
     with open(filepath, "r") as file:
         # Create an iterator containing only first n lines of a file.
-        lines = islice(file, n)
+        lines = itertools.islice(file, n)
         for line in lines:
             # Check only identifier lines.
             if line.startswith("@"):
@@ -215,7 +230,7 @@ def main() -> int:
         return 1
     if not all(file.exists() for file in files):
         print(
-            f"{SCRIPT_NAME}: error: [Errrno 2] No such file or directory '{next(filter(lambda x: not x.exists(), files))}'"
+            f"{SCRIPT_NAME}: error: [Errno 2] No such file or directory '{next(filter(lambda x: not x.exists(), files))}'"
         )
         return 2
 
@@ -237,7 +252,21 @@ def main() -> int:
         manifest = ManifestFile(pathlib.Path("stdout"))
 
     # Add entries to ManifestFile
-    manifest.extend_manifest(files, args.infer)
+    if args.regex_pattern:
+        try:
+            _, pattern, repl, options = re.split(r'(?<![^\\]\\)/', args.regex_pattern)
+        except ValueError:
+            print(
+                f"{SCRIPT_NAME}: error: substitution string must be sed-like, that is of a form: `s/pattern/replacement/[g]`."
+            )
+            return 1
+        else:
+            replace_function = functools.partial(
+                re.sub, pattern=pattern, repl=re.sub(r'\\/', '/', repl), count = "g" not in options
+            )
+            manifest.extend_manifest(files, args.infer, replace_function)
+    else:
+        manifest.extend_manifest(files, args.infer)
 
     # Create manifest file or append to existing manifest file. Else print
     # results to stdout. Return 0, meaning a success.
